@@ -14,6 +14,17 @@ const app = express();
 app.use(express.json({ limit: '40mb' }));
 app.use('/temp', express.static('/tmp'));
 
+// CORS exclusivo das APIs novas: permite que o modal do Blogger acesse o Studio Card.
+// Não altera o endpoint antigo /gerar-card nem o Worker Cloudflare.
+app.use('/editor/api', (req, res, next) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Studio-Key');
+  res.setHeader('Access-Control-Max-Age', '86400');
+  if (req.method === 'OPTIONS') return res.status(204).end();
+  next();
+});
+
 // Protege somente as APIs novas do editor. A rota antiga /gerar-card permanece intacta.
 // Configure STUDIO_EDITOR_KEY nas variáveis do serviço Render studio-card.
 app.use('/editor/api', (req, res, next) => {
