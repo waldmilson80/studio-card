@@ -6,7 +6,7 @@ const path = require('path');
 const crypto = require('crypto');
 const fetch = (...args) => import('node-fetch').then(({default: fetch}) => fetch(...args));
 
-// Módulos isolados do novo Editor Visual e do Editor de Reels.
+// Editor visual isolado: registra rotas novas sem alterar o fluxo existente de /gerar-card.
 const registerStudioEditorRoutes = require('./studio-editor-routes');
 const registerStudioMediaRoutes = require('./studio-media-routes');
 
@@ -14,12 +14,10 @@ const app = express();
 app.use(express.json({ limit: '40mb' }));
 app.use('/temp', express.static('/tmp'));
 
-// Protege somente as APIs novas do editor.
-// Configure STUDIO_EDITOR_KEY no ambiente do Render studio-card.
-// O endpoint antigo /gerar-card não passa por esta autenticação.
+// Protege somente as APIs novas do editor. A rota antiga /gerar-card permanece intacta.
+// Configure STUDIO_EDITOR_KEY nas variáveis do serviço Render studio-card.
 app.use('/editor/api', (req, res, next) => {
   const expected = String(process.env.STUDIO_EDITOR_KEY || '');
-
   if (!expected) {
     return res.status(503).json({
       success: false,
@@ -30,23 +28,16 @@ app.use('/editor/api', (req, res, next) => {
   const supplied = String(req.get('x-studio-key') || '');
   const suppliedBuffer = Buffer.from(supplied);
   const expectedBuffer = Buffer.from(expected);
-
-  const valid =
-    suppliedBuffer.length === expectedBuffer.length &&
+  const valid = suppliedBuffer.length === expectedBuffer.length &&
     crypto.timingSafeEqual(suppliedBuffer, expectedBuffer);
 
   if (!valid) {
-    return res.status(401).json({
-      success: false,
-      error: 'Chave de acesso do Studio Card inválida.'
-    });
+    return res.status(401).json({ success: false, error: 'Chave de acesso do Studio Card inválida.' });
   }
-
   next();
 });
 
-// Novas rotas de artes, modelos, carrosséis e publicação.
-// As rotas são adicionadas sem substituir /gerar-card.
+// Rotas independentes do editor. O Worker atual e o processamento de cards continuam separados.
 registerStudioEditorRoutes(app, {
   puppeteer,
   chromium,
@@ -57,12 +48,8 @@ registerStudioEditorRoutes(app, {
   gerarLegendaGeminiOficial
 });
 
-// Novas rotas de leitura de notícias, transcrição e edição de Reels.
-registerStudioMediaRoutes(app, {
-  fetch,
-  fs,
-  path
-});
+// Rotas novas de IA e vídeo em módulo separado; não substituem rotas antigas.
+registerStudioMediaRoutes(app, { fetch, fs, path });
 
 // ==================== FILA DE PROCESSAMENTO SEQUENCIAL ====================
 const queue = [];
@@ -70,111 +57,75 @@ let isProcessingQueue = false;
 
 async function processQueue() {
   if (isProcessingQueue || queue.length === 0) return;
-
   isProcessingQueue = true;
 
   const item = queue.shift();
-
   try {
-    await processarCardEInstagramEmSegundoPlano(
-      item.body,
-      item.protocol,
-      item.host
-    );
+    await processarCardEInstagramEmSegundoPlano(item.body, item.protocol, item.host);
   } catch (err) {
-    console.error('❌ Erro ao processar item da fila:', err);
+    console.error("❌ Erro ao processar item da fila:", err);
   }
 
   isProcessingQueue = false;
-
-  // Aguarda três segundos antes de processar o próximo card.
+  // Aguarda 3 segundos antes de processar o próximo card para evitar sobrecarga
   setTimeout(processQueue, 3000);
 }
 // ============================================================================
 
 function limparTextoLixo(str) {
-  if (!str) return '';
-
-  return String(str)
-    .replace(/<!\[CDATA\[/gi, '')
-    .replace(/\]\]>/gi, '')
+  if (!str) return "";
+  let limpo = str
+    .replace(/<!\[CDATA\[/gi, '') .replace(/\]\]>/gi, '')
     .replace(/<[^>]*>?/gm, ' ')
     .replace(/\b(Aparecida de Goiânia|Eleições APURAÇÃO \d+|Apuração ao Vivo|Candidatos por Goiás\d*|Apuração 2º turno\d*|Votação por ci[a-z]*|Veja o resultado|Confira a apuração)\b/gi, '')
     .replace(/\s*[-|–—]\s*(G1|Jornal Opção|Diário de Goiás|Badiinho|Zap Catalão|Portal Catalão|Blog da Verdade|Diante do Fato|SD News|TV Sudeste|Metrópoles|Poder360|O Antagonista).*$/gi, '')
     .replace(/\s+/g, ' ')
     .trim();
+  return limpo;
 }
 
 function formatarSubtituloInteligente(texto, limiteMax = 130) {
-  if (!texto) {
-    return 'Acompanhe os detalhes e os desdobramentos desta notícia';
-  }
-
-  const textoLimpo = limparTextoLixo(texto);
-
+  if (!texto) return "Acompanhe os detalhes e os desdobramentos desta notícia";
+  let textoLimpo = limparTextoLixo(texto);
   if (textoLimpo.length <= limiteMax) return textoLimpo;
-
   let subCortado = textoLimpo.substring(0, limiteMax);
-  const ultimoEspaco = subCortado.lastIndexOf(' ');
-
+  let ultimoEspaco = subCortado.lastIndexOf(' ');
   if (ultimoEspaco > 40) {
     subCortado = subCortado.substring(0, ultimoEspaco);
   }
-
-  return subCortado.trim() + '...';
+  return subCortado.trim() + "...";
 }
 
 function extrairApenasLegenda(textoBruto) {
-  if (!textoBruto) return '';
-
+  if (!textoBruto) return "";
   const match = textoBruto.match(/<legenda>([\s\S]*?)<\/legenda>/i);
-
   if (match && match[1].trim()) {
     return match[1].trim();
   }
-
-  return textoBruto.replace(/<\/?legenda>/gi, '').trim();
+  let limpo = textoBruto.replace(/<\/?legenda>/gi, '').trim();
+  return limpo;
 }
 
-// ==================== GEMINI: LEGENDA DO FLUXO ANTIGO ====================
-
-async function gerarLegendaGeminiOficial(
-  tituloLimpo,
-  textoCompletoMateria,
-  apiKeyGemini
-) {
+async function gerarLegendaGeminiOficial(tituloLimpo, textoCompletoMateria, apiKeyGemini) {
   if (!apiKeyGemini) {
-    console.error('⚠️ ERRO: GEMINI_API_KEY não configurada no Render!');
-    return '';
+    console.error("⚠️ ERRO: GEMINI_API_KEY não configurada no Render!");
+    return "";
   }
 
   let modelos = ['gemini-1.5-flash', 'gemini-1.5-pro'];
-
   try {
-    const resModels = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models?key=${apiKeyGemini}`
-    );
-
+    const resModels = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${apiKeyGemini}`);
     if (resModels.ok) {
       const dataModels = await resModels.json();
-
-      if (Array.isArray(dataModels.models)) {
-        const disponiveis = dataModels.models
-          .filter(m =>
-            m.supportedGenerationMethods &&
-            m.supportedGenerationMethods.includes('generateContent')
-          )
+      if (dataModels.models && Array.isArray(dataModels.models)) {
+        let disponiveis = dataModels.models
+          .filter(m => m.supportedGenerationMethods && m.supportedGenerationMethods.includes('generateContent'))
           .map(m => m.name.replace('models/', ''))
           .sort((a, b) => b.localeCompare(a));
-
-        if (disponiveis.length > 0) {
-          modelos = disponiveis;
-        }
+        if (disponiveis.length > 0) modelos = disponiveis;
       }
     }
-  } catch (e) {
-    // Mantém a lista de fallback do fluxo antigo.
-  }
+  } catch (e) {}
 
   const prompt = `Escreva uma legenda em Português do Brasil com base estrita na matéria abaixo, sem inventar fatos.
 
@@ -195,20 +146,19 @@ REGRA OBRIGATÓRIA DE SAÍDA:
 Coloque o texto final da legenda ESTRITAMENTE dentro das tags <legenda> e </legenda>. Não escreva nada fora delas.
 
 Título da Matéria: ${tituloLimpo}
-Conteúdo da Matéria: ${String(textoCompletoMateria || '').substring(0, 4000)}`;
+Conteúdo da Matéria: ${textoCompletoMateria.substring(0, 4000)}`;
 
   for (const modelo of modelos) {
     try {
-      const URL_API =
-        `https://generativelanguage.googleapis.com/v1beta/models/${modelo}:generateContent?key=${apiKeyGemini}`;
-
+      const URL_API = `https://generativelanguage.googleapis.com/v1beta/models/${modelo}:generateContent?key=${apiKeyGemini}`;
+      
       const response = await fetch(URL_API, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           system_instruction: {
-            parts: [{
-              text: 'Você é um jornalista e editor do portal Central Goiano. Sua escrita é jornalística, dividida em parágrafos menores, sem emojis. Sua única saída deve ser a legenda contida estritamente entre <legenda> e </legenda>.'
+            parts: [{ 
+              text: "Você é um jornalista e editor do portal Central Goiano. Sua escrita é jornalística, dividida em parágrafos menores, sem emojis. Sua única saída deve ser a legenda contida estritamente entre <legenda> e </legenda>." 
             }]
           },
           contents: [{
@@ -223,83 +173,46 @@ Conteúdo da Matéria: ${String(textoCompletoMateria || '').substring(0, 4000)}`
 
       const data = await response.json();
 
-      if (
-        data.candidates &&
-        data.candidates[0] &&
-        data.candidates[0].content &&
-        data.candidates[0].content.parts
-      ) {
-        const textoBruto = data.candidates[0].content.parts[0].text;
-        const resultado = extrairApenasLegenda(textoBruto);
-
+      if (data.candidates && data.candidates[0] && data.candidates[0].content && data.candidates[0].content.parts) {
+        let textoBruto = data.candidates[0].content.parts[0].text;
+        let resultado = extrairApenasLegenda(textoBruto);
         if (resultado && resultado.length > 20) {
           console.log(`✅ Legenda gerada com sucesso via Gemini (${modelo})!`);
           return resultado;
         }
       }
-    } catch (err) {
-      console.error(`⚠️ Falha ao gerar legenda com ${modelo}:`, err.message);
-    }
+    } catch (err) {}
   }
 
-  return '';
+  return "";
 }
 
-// ==================== FLUXO ANTIGO: GERAÇÃO DA ARTE ====================
-
-async function processarCardEInstagramEmSegundoPlano(
-  reqBody,
-  protocol,
-  host
-) {
+async function processarCardEInstagramEmSegundoPlano(reqBody, protocol, host) {
   const { titulo, subtitulo, imagemUrl, textoMateria } = reqBody;
 
-  const tituloLimpo = limparTextoLixo(titulo)
-    .replace(/^["“'«]|["”'»]$/g, '');
-
+  const tituloLimpo = limparTextoLixo(titulo).replace(/^["“'«]|["”'»]$/g, '');
   const imagemFinalCard = imagemUrl;
+  let subtituloBruto = subtitulo || textoMateria || "";
+  let subtituloLimpo = formatarSubtituloInteligente(subtituloBruto, 130);
+  let textoBaseMateria = limparTextoLixo(textoMateria || subtitulo || tituloLimpo);
 
-  const subtituloBruto = subtitulo || textoMateria || '';
-  const subtituloLimpo = formatarSubtituloInteligente(subtituloBruto, 130);
-
-  const textoBaseMateria = limparTextoLixo(
-    textoMateria || subtitulo || tituloLimpo
-  );
-
-  const API_KEY_GEMINI = process.env.GEMINI_API_KEY;
-  const IG_ACCESS_TOKEN = process.env.INSTAGRAM_ACCESS_TOKEN;
-  const IG_USER_ID = process.env.INSTAGRAM_ACCOUNT_ID;
+  const API_KEY_GEMINI = process.env.GEMINI_API_KEY; 
+  const IG_ACCESS_TOKEN = process.env.INSTAGRAM_ACCESS_TOKEN; 
+  const IG_USER_ID = process.env.INSTAGRAM_ACCOUNT_ID;            
 
   let browser = null;
-
   try {
     console.log(`🚀 [Fila] Iniciando processamento para: "${tituloLimpo}"`);
-
     const executablePath = await chromium.executablePath();
-
     browser = await puppeteer.launch({
-      args: [
-        ...chromium.args,
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage'
-      ],
-      defaultViewport: {
-        width: 1080,
-        height: 1350,
-        deviceScaleFactor: 2
-      },
-      executablePath,
-      headless: chromium.headless
+      args: [...chromium.args, '--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
+      defaultViewport: { width: 1080, height: 1350, deviceScaleFactor: 2 },
+      executablePath: executablePath,
+      headless: chromium.headless,
     });
 
     const page = await browser.newPage();
-
-    await page.setViewport({
-      width: 1080,
-      height: 1350,
-      deviceScaleFactor: 2
-    });
+    await page.setViewport({ width: 1080, height: 1350, deviceScaleFactor: 2 });
 
     const htmlContent = `
     <!DOCTYPE html>
@@ -339,7 +252,7 @@ async function processarCardEInstagramEmSegundoPlano(
           <div class="cgn-final-social-row">
             <div class="cgn-final-line"></div>
             <div class="cgn-final-icons-group">
-              <div class="cgn-final-icon-circle"><svg viewBox="0 0 24 24"><path d="M12 2.163c3.204 0 3.584.012 4.85.07 3.252.148 4.771 1.691 4.919 4.919.058 1.265.069 1.645.069 4.849 0 3.205-.012 3.584-.069 4.849-.149 3.225-1.664 4.771-4.919 4.919-1.266.058-1.644.07-4.85.07-3.204 0-3.584-.012-4.849-.07-3.26-.149-4.771-1.699-4.919-4.92-.058-1.265-.07-1.644-.07-4.849 0-3.204.013-3.583.07-4.849.149-3.227 1.664-4.771 4.919-4.919 1.266-.057 1.645-.069 4.849-.069zm0-2.163c-3.259 0-3.667.014-4.947.072-4.358.2-6.78 2.618-6.98 6.98-.059 1.281-.073 1.689-.073 4.948 0 3.259.014 3.668.072 4.948.2 4.358 2.618 6.78 6.98 6.98 1.281.058 1.689.072 4.948.072 3.259 0 3.668-.014 4.948-.072 4.354-.2 6.782-2.618 6.979-6.98.059-1.28.073-1.644.073-4.948-3.259-3.259-3.667-.014-4.947.072-4.358.2-6.78 2.618-6.98 6.98-.059 1.281-.073 1.689-.073 4.948 0 3.259.014 3.668.072 4.948.2 4.358 2.618 6.78 6.98 6.98 1.281.058 1.689.072 4.948.072 3.259 0 3.668-.014 4.948-.072 4.354-.2 6.782-2.618 6.979-6.98.059-1.28-.073-4.948.073-4.948z"/></svg></div>
+              <div class="cgn-final-icon-circle"><svg viewBox="0 0 24 24"><path d="M12 2.163c3.204 0 3.584.012 4.85.07 3.252.148 4.771 1.691 4.919 4.919.058 1.265.069 1.645.069 4.849 0 3.205-.012 3.584-.069 4.849-.149 3.225-1.664 4.771-4.919 4.919-1.266.058-1.644.07-4.85.07-3.204 0-3.584-.012-4.849-.07-3.26-.149-4.771-1.699-4.919-4.92-.058-1.265-.07-1.644-.07-4.849 0-3.204.013-3.583.07-4.849.149-3.227 1.664-4.771 4.919-4.919 1.266-.057 1.645-.069 4.849-.069zm0-2.163c-3.259 0-3.667.014-4.947.072-4.358.2-6.78 2.618-6.98 6.98-.059 1.281-.073 1.689-.073 4.948 0 3.259.014 3.668.072 4.948.2 4.358 2.618 6.78 6.98 6.98 1.281.058 1.689.072 4.948.072 3.259 0 3.668-.014 4.948-.072 4.354-.2 6.782-2.618 6.979-6.98.059-1.28.073-1.689.073-4.948 0-3.259-.014-3.667-.072-4.947-.196-4.354-2.617-6.78-6.979-6.98-1.281-.059-1.69-.073-4.949-.073zm0 5.838c-3.403 0-6.162 2.759-6.162 6.162s2.759 6.163 6.162 6.163 6.162-2.759 6.162-6.163c0-3.403-2.759-6.162-6.162-6.162zm0 10.162c-2.209 0-4-1.79-4-4 0-2.209 1.791-4 4-4s4 1.791 4 4c0 2.21-1.791 4-4 4zm6.406-11.845c-.796 0-1.441.645-1.441 1.44s.645 1.44 1.441 1.44c.795 0 1.439-.645 1.439-1.44s-.644-1.44-1.439-1.44z"/></svg></div>
               <div class="cgn-final-icon-circle"><svg viewBox="0 0 24 24"><path d="M19.615 3.184c-3.604-.246-11.631-.245-15.23 0-3.897.266-4.356 2.62-4.385 8.816.029 6.185.484 8.549 4.385 8.816 3.6.245 11.626.246 15.23 0 3.897-.266 4.356-2.62 4.385-8.816-.029-6.185-.484-8.549-4.385-8.816zm-10.615 12.816v-8l8 3.993-8 4.007z"/></svg></div>
               <div class="cgn-final-icon-circle"><svg viewBox="0 0 24 24"><path d="M9 8H6v4h3v12h5V12h3.642L18 8h-4V6.333C14 5.374 14.5 5 15.5 5H18V0h-3.808C10.592 0 9 1.815 9 5.234V8z"/></svg></div>
             </div>
@@ -349,12 +262,10 @@ async function processarCardEInstagramEmSegundoPlano(
         </div>
       </div>
     </body>
-    </html>`;
+    </html>
+    `;
 
-    await page.setContent(htmlContent, {
-      waitUntil: 'domcontentloaded',
-      timeout: 25000
-    });
+    await page.setContent(htmlContent, { waitUntil: 'domcontentloaded', timeout: 25000 });
 
     try {
       await page.waitForFunction(() => {
@@ -363,40 +274,24 @@ async function processarCardEInstagramEmSegundoPlano(
       }, { timeout: 8000 });
     } catch (e) {}
 
-    await new Promise(resolve => setTimeout(resolve, 1000));
-
+    await new Promise(r => setTimeout(r, 1000));
     const imageBuffer = await page.screenshot({ type: 'png' });
     await browser.close();
-    browser = null;
 
     const fileName = `card-${Date.now()}.png`;
     const tempFilePath = path.join('/tmp', fileName);
-
     fs.writeFileSync(tempFilePath, imageBuffer);
-
     const publicImageUrl = `${protocol}://${host}/temp/${fileName}`;
 
-    console.log('🤖 Gerando legenda com Gemini Oficial...');
-
-    let legendaFinal = await gerarLegendaGeminiOficial(
-      tituloLimpo,
-      textoBaseMateria,
-      API_KEY_GEMINI
-    );
+    console.log("🤖 Gerando legenda com Gemini Oficial...");
+    let legendaFinal = await gerarLegendaGeminiOficial(tituloLimpo, textoBaseMateria, API_KEY_GEMINI);
 
     if (!legendaFinal || legendaFinal.length < 20) {
-      legendaFinal =
-        `${tituloLimpo}\n\n` +
-        `${textoBaseMateria.substring(0, 300)}...\n\n` +
-        `Para mais informações, acesse: www.centralgoiano.com.br\n\n` +
-        `Tem uma informação ou vídeo exclusivo? Envie para o Central Goiano pelo WhatsApp (64) 9 8179-1016.\n\n` +
-        `#CentralGoiano #Noticias`;
+      legendaFinal = `${tituloLimpo}\n\n${textoBaseMateria.substring(0, 300)}...\n\nPara mais informações, acesse: www.centralgoiano.com.br\n\nTem uma informação ou vídeo exclusivo? Envie para o Central Goiano pelo WhatsApp (64) 9 8179-1016.\n\n#CentralGoiano #Noticias`;
     }
 
     if (IG_ACCESS_TOKEN && IG_USER_ID) {
-      const mediaUrl =
-        `https://graph.facebook.com/v18.0/${IG_USER_ID}/media`;
-
+      const mediaUrl = `https://graph.facebook.com/v18.0/${IG_USER_ID}/media`;
       const resMedia = await fetch(mediaUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -406,72 +301,48 @@ async function processarCardEInstagramEmSegundoPlano(
           access_token: IG_ACCESS_TOKEN
         })
       });
-
       const dataMedia = await resMedia.json();
 
       if (dataMedia.id) {
         const creationId = dataMedia.id;
+        await new Promise(r => setTimeout(r, 4000));
 
-        await new Promise(resolve => setTimeout(resolve, 4000));
-
-        const publishUrl =
-          `https://graph.facebook.com/v18.0/${IG_USER_ID}/media_publish`;
-
+        const publishUrl = `https://graph.facebook.com/v18.0/${IG_USER_ID}/media_publish`;
         await fetch(publishUrl, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            creation_id: creationId,
-            access_token: IG_ACCESS_TOKEN
-          })
+          body: JSON.stringify({ creation_id: creationId, access_token: IG_ACCESS_TOKEN })
         });
-
-        console.log('🎉 Publicado com Sucesso no Instagram!');
-      } else {
-        console.error('❌ Instagram recusou a criação da mídia:', dataMedia);
+        console.log("🎉 Publicado com Sucesso no Instagram!");
       }
-    } else {
-      console.warn('⚠️ Credenciais do Instagram não configuradas neste Render.');
     }
   } catch (err) {
-    if (browser) {
-      try {
-        await browser.close();
-      } catch (closeError) {}
-    }
-
-    console.error('❌ Erro no processamento em segundo plano:', err);
+    if (browser) await browser.close();
+    console.error("❌ Erro no processamento em segundo plano:", err);
   }
 }
-
-// ==================== ENDPOINT ANTIGO: NÃO REMOVER ====================
 
 app.post('/gerar-card', (req, res) => {
   const { titulo, imagemUrl } = req.body;
 
   if (!titulo) {
-    return res.status(400).json({
-      error: 'Título é obrigatório'
-    });
+    return res.status(400).json({ error: 'Título é obrigatório' });
   }
 
-  if (
-    !imagemUrl ||
-    typeof imagemUrl !== 'string' ||
-    !imagemUrl.startsWith('http')
-  ) {
+  if (!imagemUrl || typeof imagemUrl !== 'string' || !imagemUrl.startsWith("http")) {
     return res.json({
       sucesso: false,
-      mensagem: 'Nenhuma imagem válida encontrada.'
+      mensagem: "Nenhuma imagem válida encontrada."
     });
   }
 
-  // Responde imediatamente ao cliente antigo.
+  // Responde IMEDIATAMENTE ao Apps Script
   res.json({
     sucesso: true,
-    mensagem: 'Processamento enfileirado com sucesso.'
+    mensagem: "Processamento enfileirado com sucesso."
   });
 
+  // Adiciona o pedido à fila de execução sequencial
   queue.push({
     body: req.body,
     protocol: req.protocol,
@@ -481,13 +352,12 @@ app.post('/gerar-card', (req, res) => {
   processQueue();
 });
 
-// Página raiz compatível com o monitor do Render.
+// Apenas a rota GET adicionada para o UptimeRobot manter o Render acordado
 app.get('/', (req, res) => {
-  res.status(200).send('OK');
+  res.status(200).send("OK");
 });
 
 const PORT = process.env.PORT || 10000;
-
 app.listen(PORT, () => {
   console.log(`Servidor rodando na porta ${PORT}`);
 });
