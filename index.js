@@ -3,7 +3,6 @@ const puppeteer = require('puppeteer-core');
 const chromium = require('@sparticuz/chromium');
 const fs = require('fs');
 const path = require('path');
-const crypto = require('crypto');
 const fetch = (...args) => import('node-fetch').then(({default: fetch}) => fetch(...args));
 
 // Editor visual isolado: registra rotas novas sem alterar o fluxo existente de /gerar-card.
@@ -19,35 +18,13 @@ app.use('/temp', express.static('/tmp'));
 app.use('/editor/api', (req, res, next) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Studio-Key');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
   res.setHeader('Access-Control-Max-Age', '86400');
   if (req.method === 'OPTIONS') return res.status(204).end();
   next();
 });
 
-// Protege somente as APIs novas do editor. A rota antiga /gerar-card permanece intacta.
-// Configure STUDIO_EDITOR_KEY nas variáveis do serviço Render studio-card.
-app.use('/editor/api', (req, res, next) => {
-  const expected = String(process.env.STUDIO_EDITOR_KEY || '');
-  if (!expected) {
-    return res.status(503).json({
-      success: false,
-      error: 'O editor ainda não está protegido. Configure STUDIO_EDITOR_KEY nas variáveis do Render studio-card e tente novamente.'
-    });
-  }
-
-  const supplied = String(req.get('x-studio-key') || '');
-  const suppliedBuffer = Buffer.from(supplied);
-  const expectedBuffer = Buffer.from(expected);
-  const valid = suppliedBuffer.length === expectedBuffer.length &&
-    crypto.timingSafeEqual(suppliedBuffer, expectedBuffer);
-
-  if (!valid) {
-    return res.status(401).json({ success: false, error: 'Chave de acesso do Studio Card inválida.' });
-  }
-  next();
-});
-
+// APIs novas do editor são acessíveis sem STUDIO_EDITOR_KEY, conforme solicitado.
 // Rotas independentes do editor. O Worker atual e o processamento de cards continuam separados.
 registerStudioEditorRoutes(app, {
   puppeteer,
