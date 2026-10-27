@@ -234,7 +234,7 @@ module.exports = function registerStudioMediaRoutes(app, deps) {
       const layerFiles = { overlay, overlay2 };
       const layerInfos = { overlay: overlayInfo, overlay2: overlay2Info };
       const layerSpecs = {
-        overlay: { x: clamp(req.body?.overlayX,0,100,0), y: clamp(req.body?.overlayY,0,100,0), scale: clamp(req.body?.overlayScale,5,100,100) },
+        overlay: { x: clamp(req.body?.overlayX,0,100,50), y: clamp(req.body?.overlayY,0,100,10), scale: clamp(req.body?.overlayScale,5,100,30) },
         overlay2: { x: clamp(req.body?.overlay2X,0,100,50), y: clamp(req.body?.overlay2Y,0,100,50), scale: clamp(req.body?.overlay2Scale,5,100,35) }
       };
       let requestedOrder=[];
