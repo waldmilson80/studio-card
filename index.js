@@ -10,21 +10,59 @@ const registerStudioEditorRoutes = require('./studio-editor-routes');
 const registerStudioMediaRoutes = require('./studio-media-routes');
 
 const app = express();
-app.use(express.json({ limit: '40mb' }));
-app.use('/temp', express.static('/tmp'));
 
-// CORS exclusivo das APIs novas: permite que o modal do Blogger acesse o Studio Card.
-// Não altera o endpoint antigo /gerar-card nem o Worker Cloudflare.
-app.use('/editor/api', (req, res, next) => {
+// CORS robusto apenas para APIs do editor e arquivos gerados para download.
+// Necessário porque o modal do Blogger e o serviço Render têm origens diferentes.
+// Não modifica o Worker, a rota antiga /gerar-card nem as demais APIs do site.
+app.use((req, res, next) => {
+  const pathName = String(req.path || '');
+  const isEditorApi = pathName === '/editor/api' || pathName.startsWith('/editor/api/');
+  const isTempFile = pathName === '/temp' || pathName.startsWith('/temp/');
+  if (!isEditorApi && !isTempFile) return next();
+
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Accept, Range, Origin');
+  res.setHeader('Access-Control-Expose-Headers', 'Content-Length, Content-Range, Accept-Ranges, Content-Disposition');
   res.setHeader('Access-Control-Max-Age', '86400');
-  if (req.method === 'OPTIONS') return res.status(204).end();
+  res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
+
+  if (isEditorApi && req.method === 'OPTIONS') return res.status(204).end();
   next();
 });
 
-// APIs novas do editor são acessíveis sem STUDIO_EDITOR_KEY, conforme solicitado.
+app.use(express.json({ limit: '40mb' }));
+
+app.use('/temp', express.static('/tmp', {
+  setHeaders(res) {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
+    res.setHeader('Accept-Ranges', 'bytes');
+  }
+}));
+
+// O editor é de acesso direto e não solicita senha no navegador.
+// Limite básico por IP para reduzir chamadas automáticas abusivas nas APIs públicas.
+const editorApiBuckets = new Map();
+const EDITOR_API_WINDOW_MS = 60 * 1000;
+const EDITOR_API_MAX_REQUESTS = 40;
+app.use('/editor/api', (req, res, next) => {
+  if (req.method === 'OPTIONS') return next();
+  const now = Date.now();
+  const ip = String(req.headers['cf-connecting-ip'] || req.headers['x-forwarded-for'] || req.socket?.remoteAddress || 'unknown').split(',')[0].trim();
+  let bucket = editorApiBuckets.get(ip);
+  if (!bucket || now - bucket.start >= EDITOR_API_WINDOW_MS) {
+    bucket = { start: now, count: 0 };
+    editorApiBuckets.set(ip, bucket);
+  }
+  bucket.count += 1;
+  if (bucket.count > EDITOR_API_MAX_REQUESTS) {
+    res.setHeader('Retry-After', '60');
+    return res.status(429).json({ success: false, error: 'Muitas solicitações em pouco tempo. Aguarde um minuto e tente novamente.' });
+  }
+  next();
+});
+
 // Rotas independentes do editor. O Worker atual e o processamento de cards continuam separados.
 registerStudioEditorRoutes(app, {
   puppeteer,
