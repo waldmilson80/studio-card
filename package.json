@@ -1,16 +1,21 @@
 {
-  "name": "cgn-card-generator",
+  "name": "studio-card",
   "version": "1.0.0",
-  "description": "Gerador de cards para o Central Goiano via Puppeteer",
+  "private": true,
+  "description": "Editor visual isolado do Central Goiano para artes e Reels do Instagram",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
+  "engines": {
+    "node": ">=20"
+  },
   "dependencies": {
-    "@sparticuz/chromium": "^121.0.0",
-    "express": "^4.19.2",
-    "form-data": "^4.0.0",
-    "node-fetch": "^2.6.7",
-    "puppeteer-core": "^22.0.0"
+    "@sparticuz/chromium": "^138.0.2",
+    "express": "^4.21.2",
+    "ffmpeg-static": "^5.2.0",
+    "multer": "^2.0.2",
+    "node-fetch": "^3.3.2",
+    "puppeteer-core": "^24.15.0"
   }
 }
