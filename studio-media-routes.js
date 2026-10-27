@@ -16,7 +16,7 @@ module.exports = function registerStudioMediaRoutes(app, deps) {
 
   const upload = multer({
     dest: uploadDir,
-    limits: { fileSize: 250 * 1024 * 1024, files: 3, fields: 20 }
+    limits: { fileSize: 250 * 1024 * 1024, files: 4, fields: 30 }
   });
 
   const clamp = (value, min, max, fallback) => {
@@ -194,106 +194,104 @@ module.exports = function registerStudioMediaRoutes(app, deps) {
   });
 
   app.post('/editor/api/video/render', upload.fields([
-    { name: 'video', maxCount: 1 }, { name: 'overlay', maxCount: 1 }, { name: 'ending', maxCount: 1 }
+    { name: 'video', maxCount: 1 }, { name: 'overlay', maxCount: 1 },
+    { name: 'overlay2', maxCount: 1 }, { name: 'ending', maxCount: 1 }
   ]), async (req, res) => {
     const files = Object.values(req.files || {}).flat();
     const tempFiles = [];
     try {
       const source = req.files?.video?.[0];
       const overlay = req.files?.overlay?.[0] || null;
+      const overlay2 = req.files?.overlay2?.[0] || null;
       const ending = req.files?.ending?.[0] || null;
       if (!source) throw new Error('Selecione o vídeo principal do Reels.');
       const info = await probeMedia(source.path);
       const overlayInfo = overlay ? await probeMedia(overlay.path) : null;
+      const overlay2Info = overlay2 ? await probeMedia(overlay2.path) : null;
       if (!info.duration) throw new Error('Não consegui detectar a duração do vídeo.');
       if (info.duration > 1800) throw new Error('Use um vídeo de até 30 minutos para evitar processamento excessivo.');
       const start = clamp(req.body?.start, 0, Math.max(0, info.duration - 0.2), 0);
       const requestedEnd = Number(req.body?.end || 0);
       if (requestedEnd > 0 && requestedEnd <= start) throw new Error('O fim do corte deve ser maior que o início.');
       const duration = requestedEnd > 0 ? Math.min(requestedEnd, info.duration) - start : Math.max(0.2, info.duration - start);
-      const endSecondsRequested = clamp(req.body?.endingSeconds, 1, 12, 3);
+      const endingSeconds = clamp(req.body?.endingSeconds, 1, 12, 3);
       if (duration < 0.2) throw new Error('O trecho escolhido é curto demais.');
       if (!ending && duration < 3) throw new Error('O Instagram exige Reels com pelo menos 3 segundos. Aumente o trecho ou adicione um final.');
-      if (ending && duration + endSecondsRequested < 3) throw new Error('O Reels final precisa ter pelo menos 3 segundos. Aumente o trecho ou a duração do final.');
-      const overlayX = clamp(req.body?.overlayX, 0, 100, 0);
-      const overlayY = clamp(req.body?.overlayY, 0, 100, 0);
-      const overlayScale = clamp(req.body?.overlayScale, 5, 100, 100);
+      if (ending && duration + endingSeconds < 3) throw new Error('O Reels final precisa ter pelo menos 3 segundos.');
+
+      const ratio = String(req.body?.aspectRatio || '9:16');
+      const dimensions = {
+        '9:16': { width: 1080, height: 1920 },
+        '4:5': { width: 1080, height: 1350 },
+        '1:1': { width: 1080, height: 1080 },
+        '16:9': { width: 1920, height: 1080 }
+      };
+      const output = dimensions[ratio] || dimensions['9:16'];
+      const outW = output.width, outH = output.height;
       const mainOut = path.join(uploadDir, `main-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.mp4`);
       tempFiles.push(mainOut);
-
       const args = ['-y', '-ss', String(start), '-i', source.path];
-      let overlayIndex = -1;
-      let inputCount = 1;
-      if (overlay) {
-        overlayIndex = inputCount++;
-        if (/^image\//i.test(overlay.mimetype || '')) args.push('-loop', '1', '-framerate', '30', '-i', overlay.path);
-        else args.push('-stream_loop', '-1', '-i', overlay.path);
-      }
-      let silenceIndex = -1;
-      if (!info.hasAudio) {
-        silenceIndex = inputCount++;
-        args.push('-f', 'lavfi', '-i', 'anullsrc=channel_layout=stereo:sample_rate=48000');
-      }
-      const filters = ['[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,fps=30,setsar=1[base]'];
-      if (overlay) {
-        const width = Math.max(54, Math.round(1080 * overlayScale / 100 / 2) * 2);
-        const aspect = overlayInfo?.width > 0 && overlayInfo?.height > 0
-          ? overlayInfo.width / overlayInfo.height : (9 / 16);
-        const overlayHeight = Math.min(1920, Math.round(width / aspect));
-        const x = Math.round(Math.max(0, 1080 - width) * overlayX / 100);
-        const y = Math.round(Math.max(0, 1920 - overlayHeight) * overlayY / 100);
-        filters.push(`[${overlayIndex}:v]scale=${width}:-2,format=rgba,setpts=PTS-STARTPTS[layer]`);
-        filters.push(`[base][layer]overlay=x=${x}:y=${y}:eof_action=repeat:shortest=1[vout]`);
-      } else filters.push('[base]null[vout]');
-      args.push('-filter_complex', filters.join(';'), '-map', '[vout]');
-      if (info.hasAudio) args.push('-map', '0:a:0?');
-      else args.push('-map', `${silenceIndex}:a:0`);
-      args.push('-t', String(duration), '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '22', '-pix_fmt', 'yuv420p', '-r', '30', '-c:a', 'aac', '-b:a', '128k', '-ar', '48000', '-ac', '2', '-movflags', '+faststart', '-shortest', mainOut);
+      const layerFiles = { overlay, overlay2 };
+      const layerInfos = { overlay: overlayInfo, overlay2: overlay2Info };
+      const layerSpecs = {
+        overlay: { x: clamp(req.body?.overlayX,0,100,0), y: clamp(req.body?.overlayY,0,100,0), scale: clamp(req.body?.overlayScale,5,100,100) },
+        overlay2: { x: clamp(req.body?.overlay2X,0,100,50), y: clamp(req.body?.overlay2Y,0,100,50), scale: clamp(req.body?.overlay2Scale,5,100,35) }
+      };
+      let requestedOrder=[];
+      try { const parsed=JSON.parse(String(req.body?.layerOrder||'[]')); if(Array.isArray(parsed))requestedOrder=parsed.filter(x=>x==='overlay'||x==='overlay2'); } catch (_) {}
+      const seen=new Set();
+      // layerOrder is bottom-to-top. Default puts layer 2 behind layer 1.
+      const layerOrder=[...requestedOrder,'overlay2','overlay'].filter(name=>{if(!layerFiles[name]||seen.has(name))return false;seen.add(name);return true;});
+      const layerInputIndexes={}; let inputCount=1;
+      for(const name of layerOrder){const file=layerFiles[name];if(!file)continue;layerInputIndexes[name]=inputCount++;if(/^image\//i.test(file.mimetype||''))args.push('-loop','1','-framerate','30','-i',file.path);else args.push('-stream_loop','-1','-i',file.path);}
+      let silenceIndex=-1;
+      if(!info.hasAudio){silenceIndex=inputCount++;args.push('-f','lavfi','-i','anullsrc=channel_layout=stereo:sample_rate=48000');}
+      const filters=[`[0:v]scale=${outW}:${outH}:force_original_aspect_ratio=increase,crop=${outW}:${outH},fps=30,setsar=1[base]`];
+      let previous='base',layerNumber=0;
+      for(const name of layerOrder){const file=layerFiles[name];if(!file)continue;const li=layerInfos[name];const spec=layerSpecs[name];const aspect=li?.width>0&&li?.height>0?li.width/li.height:(9/16);const width=Math.max(2,Math.min(Math.round(outW*spec.scale/100/2)*2,Math.floor(Math.min(outW,outH*aspect)/2)*2));const height=Math.max(2,Math.min(outH,Math.round(width/aspect/2)*2));const x=Math.round(Math.max(0,outW-width)*spec.x/100);const y=Math.round(Math.max(0,outH-height)*spec.y/100);const il=`lay${layerNumber}`,ol=`mix${layerNumber}`;filters.push(`[${layerInputIndexes[name]}:v]scale=${width}:${height}:force_original_aspect_ratio=decrease,format=rgba,setpts=PTS-STARTPTS[${il}]`);filters.push(`[${previous}][${il}]overlay=x=${x}:y=${y}:eof_action=repeat:shortest=1[${ol}]`);previous=ol;layerNumber++;}
+      if(previous==='base')filters.push('[base]null[vout]');else filters.push(`[${previous}]null[vout]`);
+      args.push('-filter_complex',filters.join(';'),'-map','[vout]');
+      if(info.hasAudio)args.push('-map','0:a:0?');else args.push('-map',`${silenceIndex}:a:0`);
+      args.push('-t',String(duration),'-c:v','libx264','-preset','veryfast','-crf','22','-pix_fmt','yuv420p','-r','30','-c:a','aac','-b:a','128k','-ar','48000','-ac','2','-movflags','+faststart','-shortest',mainOut);
       await runFfmpeg(args);
 
-      let finalOut = mainOut;
-      if (ending) {
-        const endingOut = path.join(uploadDir, `ending-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.mp4`);
-        tempFiles.push(endingOut);
-        const endingSeconds = endSecondsRequested;
-        const endingArgs = ['-y'];
-        if (/^image\//i.test(ending.mimetype || '')) endingArgs.push('-loop', '1', '-framerate', '30', '-i', ending.path);
-        else endingArgs.push('-stream_loop', '-1', '-i', ending.path);
-        endingArgs.push('-f', 'lavfi', '-i', 'anullsrc=channel_layout=stereo:sample_rate=48000',
-          '-vf', 'scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,fps=30,setsar=1',
-          '-map', '0:v:0', '-map', '1:a:0', '-t', String(endingSeconds), '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '22', '-pix_fmt', 'yuv420p', '-r', '30', '-c:a', 'aac', '-b:a', '128k', '-ar', '48000', '-ac', '2', '-movflags', '+faststart', '-shortest', endingOut);
+      let finalOut=mainOut;
+      if(ending){
+        const endingOut=path.join(uploadDir,`ending-${Date.now()}-${Math.random().toString(36).slice(2,8)}.mp4`);tempFiles.push(endingOut);
+        const endingArgs=['-y'];if(/^image\//i.test(ending.mimetype||''))endingArgs.push('-loop','1','-framerate','30','-i',ending.path);else endingArgs.push('-stream_loop','-1','-i',ending.path);
+        endingArgs.push('-f','lavfi','-i','anullsrc=channel_layout=stereo:sample_rate=48000','-vf',`scale=${outW}:${outH}:force_original_aspect_ratio=increase,crop=${outW}:${outH},fps=30,setsar=1`,'-map','0:v:0','-map','1:a:0','-t',String(endingSeconds),'-c:v','libx264','-preset','veryfast','-crf','22','-pix_fmt','yuv420p','-r','30','-c:a','aac','-b:a','128k','-ar','48000','-ac','2','-movflags','+faststart','-shortest',endingOut);
         await runFfmpeg(endingArgs);
-        const listPath = path.join(uploadDir, `concat-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.txt`);
-        const concatOut = path.join('/tmp', `studio-reel-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.mp4`);
-        tempFiles.push(listPath);
-        fs.writeFileSync(listPath, `file '${mainOut}'\nfile '${endingOut}'\n`, 'utf8');
-        await runFfmpeg(['-y', '-f', 'concat', '-safe', '0', '-i', listPath, '-c', 'copy', '-movflags', '+faststart', concatOut]);
-        finalOut = concatOut;
+        const listPath=path.join(uploadDir,`concat-${Date.now()}-${Math.random().toString(36).slice(2,8)}.txt`);tempFiles.push(listPath);
+        const concatOut=path.join(uploadDir,`concat-out-${Date.now()}-${Math.random().toString(36).slice(2,8)}.mp4`);tempFiles.push(concatOut);
+        fs.writeFileSync(listPath,`file '${mainOut}'\nfile '${endingOut}'\n`,'utf8');
+        await runFfmpeg(['-y','-f','concat','-safe','0','-i',listPath,'-c','copy','-movflags','+faststart',concatOut]);finalOut=concatOut;
       }
-
-      // Always copy the final video to a persistent public /tmp file before
-      // cleanup runs. Temporary render inputs (including the concat output)
-      // are deleted in finally; the published copy must survive for download
-      // and the Instagram media fetch.
-      const finalName = `studio-reel-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.mp4`;
-      const publicPath = path.join('/tmp', finalName);
-      fs.copyFileSync(finalOut, publicPath);
-      const host = String(req.get('host') || '').replace(/[^a-z0-9.:-]/gi, '');
-      if (!host) throw new Error('Não foi possível formar a URL pública do vídeo.');
-      res.json({ success: true, fileName: finalName, videoUrl: `https://${host}/temp/${finalName}`, width: 1080, height: 1920 });
-    } catch (error) {
-      res.status(400).json({ success: false, error: error.message || 'Falha ao montar o Reels.' });
-    } finally {
-      cleanUploaded(files);
-      for (const file of tempFiles) { try { fs.unlinkSync(file); } catch (_) {} }
-    }
+      const finalName=`studio-reel-${Date.now()}-${Math.random().toString(36).slice(2,8)}.mp4`;
+      const publicPath=path.join('/tmp',finalName);fs.copyFileSync(finalOut,publicPath);
+      const host=String(req.get('host')||'').replace(/[^a-z0-9.:-]/gi,'');if(!host)throw new Error('Não foi possível formar a URL pública do vídeo.');
+      res.json({success:true,fileName:finalName,videoUrl:`https://${host}/temp/${finalName}`,width:outW,height:outH,aspectRatio:ratio in dimensions?ratio:'9:16'});
+    } catch(error){res.status(400).json({success:false,error:error.message||'Falha ao montar o Reels.'});}
+    finally{cleanUploaded(files);for(const file of tempFiles){try{fs.unlinkSync(file);}catch(_){}}}
   });
 
   app.post('/editor/api/video/publish', async (req, res) => {
     try {
-      const token = process.env.INSTAGRAM_ACCESS_TOKEN;
-      const userId = process.env.INSTAGRAM_ACCOUNT_ID;
-      if (!token || !userId) throw new Error('Configure INSTAGRAM_ACCESS_TOKEN e INSTAGRAM_ACCOUNT_ID neste Render.');
+      const profile = String(req.body?.profile || 'padrao').trim().toLowerCase();
+      let token = '';
+      let userId = '';
+      if (profile === 'padrao') {
+        token = process.env.CGN_PADRAO_INSTAGRAM_ACCESS_TOKEN;
+        userId = process.env.CGN_PADRAO_INSTAGRAM_ACCOUNT_ID;
+        if (!token || !userId) {
+          throw new Error('Para publicar pelo destino Padrão CGN usando o editor novo, configure CGN_PADRAO_INSTAGRAM_ACCESS_TOKEN e CGN_PADRAO_INSTAGRAM_ACCOUNT_ID no Render studio-card. Copie os valores do perfil padrão diretamente do Environment do Render antigo; não envie os tokens pelo chat.');
+        }
+      } else if (profile === 'studio') {
+        token = process.env.INSTAGRAM_ACCESS_TOKEN;
+        userId = process.env.INSTAGRAM_ACCOUNT_ID;
+        if (!token || !userId) throw new Error('Configure INSTAGRAM_ACCESS_TOKEN e INSTAGRAM_ACCOUNT_ID para o perfil Studio Card no Environment deste Render.');
+      } else {
+        throw new Error('Destino Instagram desconhecido. Selecione Padrão CGN ou Studio Card no botão Destino Insta.');
+      }
       const fileName = path.basename(String(req.body?.fileName || ''));
       if (!/^studio-reel-[a-z0-9-]+\.mp4$/i.test(fileName)) throw new Error('Nome do Reels inválido. Gere o vídeo novamente antes de publicar.');
       const filePath = path.join('/tmp', fileName);
