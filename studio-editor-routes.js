@@ -393,12 +393,29 @@ module.exports = function registerStudioEditorRoutes(app, deps) {
     return `${String(title || '').trim()}\n\n${String(clean).substring(0, 350)}\n\nPara mais informações, acesse: www.centralgoiano.com.br\n\nTem uma informação ou vídeo exclusivo? Envie para o Central Goiano pelo WhatsApp (64) 9 8179-1016.\n\n#CentralGoiano #Noticias`.slice(0, 2200);
   }
 
-  function requireInstagramCredentials() {
-    const token = process.env.INSTAGRAM_ACCESS_TOKEN;
-    const userId = process.env.INSTAGRAM_ACCOUNT_ID;
-    if (!token || !userId) {
-      throw new Error('Configure INSTAGRAM_ACCESS_TOKEN e INSTAGRAM_ACCOUNT_ID nas variáveis deste Render.');
+  function requireInstagramCredentials(profile = 'padrao') {
+    // O perfil é escolhido no seletor Destino Insta do modal.
+    // Nunca recebemos tokens do navegador: as credenciais ficam no Environment do Render.
+    const normalized = String(profile || 'padrao').trim().toLowerCase();
+    let token;
+    let userId;
+
+    if (normalized === 'padrao') {
+      token = process.env.CGN_PADRAO_INSTAGRAM_ACCESS_TOKEN;
+      userId = process.env.CGN_PADRAO_INSTAGRAM_ACCOUNT_ID;
+      if (!token || !userId) {
+        throw new Error('Para publicar pelo destino Padrão CGN usando o editor novo, configure CGN_PADRAO_INSTAGRAM_ACCESS_TOKEN e CGN_PADRAO_INSTAGRAM_ACCOUNT_ID no Render studio-card. Copie os valores do perfil padrão diretamente do Environment do Render antigo; não envie os tokens pelo chat.');
+      }
+    } else if (normalized === 'studio') {
+      token = process.env.INSTAGRAM_ACCESS_TOKEN;
+      userId = process.env.INSTAGRAM_ACCOUNT_ID;
+      if (!token || !userId) {
+        throw new Error('Configure INSTAGRAM_ACCESS_TOKEN e INSTAGRAM_ACCOUNT_ID para o perfil Studio Card no Environment deste Render.');
+      }
+    } else {
+      throw new Error('Destino Instagram desconhecido. Selecione Padrão CGN ou Studio Card no botão Destino Insta.');
     }
+
     return { token, userId };
   }
 
@@ -428,10 +445,10 @@ module.exports = function registerStudioEditorRoutes(app, deps) {
   app.post('/editor/api/analyze-carousel', async (req, res) => {
     try {
       const images = Array.isArray(req.body?.images) ? req.body.images.slice(0, MAX_SLIDES) : [];
-      if (images.length < MIN_SLIDES) throw new Error('Envie pelo menos dois prints para montar um carrossel.');
+      if (images.length < 1) throw new Error('Envie pelo menos um print para montar um carrossel.');
       const parts = readImageParts(images);
       const raw = await callGemini(parts,
-        `Analise os ${images.length} prints de notícias na ordem enviada. Extraia apenas informações legíveis e organize em um carrossel jornalístico de Instagram com o mesmo número de slides, no máximo 10. Use português do Brasil, tom jornalístico e não invente fatos. Cada slide deve ter uma manchete curta (até 90 caracteres), um texto explicativo com 1 ou 2 frases (até 240 caracteres) e até 3 palavras para destacar em vermelho. A primeira página deve funcionar como capa. Retorne SOMENTE JSON válido neste formato: {"slides":[{"title":"","body":"","highlightWords":"PALAVRA1, PALAVRA2"}]}. Se faltar informação, use somente o que estiver legível e não complete com suposições.`);
+        `Leia os ${images.length} prints de notícia na ordem enviada. Extraia apenas informações legíveis, sem inventar fatos. Se houver 2 ou mais prints, organize um carrossel de 2 a 10 slides preservando a sequência útil. Se houver apenas 1 print, crie de 3 a 5 slides curtos a partir de aspectos diferentes explicitamente presentes nessa mesma notícia: capa, fato principal e detalhes/serviços que realmente apareçam no print. Não repita a mesma frase para completar slides e não crie fatos novos; se houver poucos dados, produza o menor número de slides que faça sentido (mínimo 2). Português do Brasil, tom jornalístico. Cada slide deve ter manchete de até 90 caracteres, texto de 1 ou 2 frases (até 240 caracteres) e até 3 palavras para destaque em vermelho. Retorne SOMENTE JSON válido: {"slides":[{"title":"","body":"","highlightWords":"PALAVRA1, PALAVRA2"}]}. Se faltar informação, use somente o que estiver legível e não complete com suposições.`);
       const parsed = parseModelJson(raw);
       const slides = Array.isArray(parsed.slides) ? parsed.slides.slice(0, MAX_SLIDES).map((slide, index) => ({
         title: String(slide.title || `Notícia ${index + 1}`).trim().slice(0, 160),
@@ -476,7 +493,7 @@ module.exports = function registerStudioEditorRoutes(app, deps) {
 
   app.post('/editor/api/publish', async (req, res) => {
     try {
-      const { token, userId } = requireInstagramCredentials();
+      const { token, userId } = requireInstagramCredentials(req.body?.profile);
       const payload = {
         title: req.body?.title,
         subtitle: req.body?.subtitle,
@@ -505,7 +522,7 @@ module.exports = function registerStudioEditorRoutes(app, deps) {
 
   app.post('/editor/api/publish-carousel', async (req, res) => {
     try {
-      const { token, userId } = requireInstagramCredentials();
+      const { token, userId } = requireInstagramCredentials(req.body?.profile);
       const design = sanitizeDesign(req.body?.design || {});
       const logoData = safeOptionalDataImage(req.body?.logoData || '');
       const slides = Array.isArray(req.body?.slides) ? req.body.slides.slice(0, MAX_SLIDES) : [];
