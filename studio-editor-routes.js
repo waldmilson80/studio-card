@@ -520,6 +520,37 @@ module.exports = function registerStudioEditorRoutes(app, deps) {
     }
   });
 
+  // Publica o JPEG exato exportado pelo canvas editável do navegador.
+  // Usa as mesmas credenciais protegidas no Environment e o destino selecionado.
+  app.post('/editor/api/publish-rendered-art', async (req, res) => {
+    let filePath = '';
+    try {
+      const { token, userId } = requireInstagramCredentials(req.body?.profile);
+      const dataUrl = String(req.body?.imageData || '').trim();
+      const match = dataUrl.match(/^data:image\/(?:jpeg|jpg|png);base64,([a-z0-9+/=\r\n]+)$/i);
+      if (!match) throw new Error('O canvas não retornou uma imagem JPEG/PNG válida. Exporte a arte novamente.');
+      const buffer = Buffer.from(match[1], 'base64');
+      if (buffer.length < 1000) throw new Error('A imagem exportada está vazia ou incompleta.');
+      if (buffer.length > 12 * 1024 * 1024) throw new Error('A arte exportada excedeu 12 MB. Reduza o tamanho da imagem e tente novamente.');
+      const fileName = `studio-art-canvas-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.jpg`;
+      filePath = path.join('/tmp', fileName);
+      fs.writeFileSync(filePath, buffer);
+      const host = String(req.get('host') || '').replace(/[^a-z0-9.:-]/gi, '');
+      if (!host) throw new Error('Não foi possível identificar o endereço público do Render.');
+      const imageUrl = `https://${host}/temp/${fileName}`;
+      const caption = await buildCaption(req.body?.title || 'Central Goiano', req.body?.captionText || req.body?.subtitle || '', req.body?.caption);
+      const graphBase = `https://graph.facebook.com/${GRAPH_VERSION}/${encodeURIComponent(userId)}`;
+      const creation = await graphPost(`${graphBase}/media`, { image_url: imageUrl, caption, access_token: token });
+      await waitForContainer(creation.id, token);
+      const published = await graphPost(`${graphBase}/media_publish`, { creation_id: creation.id, access_token: token });
+      res.json({ success: true, message: 'Arte do canvas publicada no Instagram.', mediaId: published.id });
+    } catch (error) {
+      res.status(502).json({ success: false, error: error.message || 'Falha ao publicar a arte editada.' });
+    } finally {
+      if (filePath) { try { fs.unlinkSync(filePath); } catch (_) {} }
+    }
+  });
+
   app.post('/editor/api/publish-carousel', async (req, res) => {
     try {
       const { token, userId } = requireInstagramCredentials(req.body?.profile);
