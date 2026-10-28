@@ -274,6 +274,89 @@ module.exports = function registerStudioMediaRoutes(app, deps) {
     finally{cleanUploaded(files);for(const file of tempFiles){try{fs.unlinkSync(file);}catch(_){}}}
   });
 
+  // Importa o vídeo exportado do editor do navegador para armazenamento temporário
+  // estável. A Meta precisa acessar uma URL pública para baixar o arquivo.
+  app.post('/editor/api/video/store-rendered', upload.single('video'), async (req, res) => {
+    const file = req.file;
+    try {
+      if (!file || !safeUploadName(file)) throw new Error('Envie o MP4 exportado pela área de edição.');
+      const info = await probeMedia(file.path);
+      if (!info.width || !info.height) throw new Error('O arquivo enviado não contém um vídeo válido.');
+      if (info.duration < 3) throw new Error('O Reels precisa ter pelo menos 3 segundos.');
+      if (info.duration > 180) throw new Error('O Reels excedeu 180 segundos. Reduza a edição antes de publicar.');
+      const finalName = `studio-reel-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.mp4`;
+      const publicPath = path.join('/tmp', finalName);
+      fs.copyFileSync(file.path, publicPath);
+      const host = String(req.get('host') || '').replace(/[^a-z0-9.:-]/gi, '');
+      if (!host) { try { fs.unlinkSync(publicPath); } catch (_) {} throw new Error('Não foi possível formar a URL pública do MP4.'); }
+      res.json({ success:true, fileName:finalName, videoUrl:`https://${host}/temp/${finalName}`, duration:info.duration, width:info.width, height:info.height });
+    } catch (error) {
+      res.status(400).json({ success:false, error:error.message || 'Não foi possível preparar o MP4 final.' });
+    } finally { cleanUploaded(file ? [file] : []); }
+  });
+
+  // Lip Sync por IA: sincroniza movimento labial do vídeo com o áudio enviado.
+  // O segredo FAL_KEY permanece somente no servidor do Render. Como é uma API pública,
+  // limitamos tentativas por IP para reduzir abuso e consumo inesperado de créditos.
+  const lipSyncRateBuckets = new Map();
+  function limitLipSync(req, res, next) {
+    const now = Date.now();
+    const ip = String(req.headers['cf-connecting-ip'] || req.headers['x-forwarded-for'] || req.socket?.remoteAddress || 'unknown').split(',')[0].trim();
+    let bucket = lipSyncRateBuckets.get(ip);
+    if (!bucket || now - bucket.start >= 60 * 60 * 1000) { bucket = { start: now, count: 0 }; lipSyncRateBuckets.set(ip, bucket); }
+    bucket.count += 1;
+    if (lipSyncRateBuckets.size > 5000) {
+      for (const [key, value] of lipSyncRateBuckets) if (now - value.start >= 60 * 60 * 1000) lipSyncRateBuckets.delete(key);
+    }
+    if (bucket.count > 3) return res.status(429).json({ success:false, error:'Limite de Lip Sync atingido para este IP. Tente novamente depois de uma hora.' });
+    next();
+  }
+  app.post('/editor/api/video/lipsync', limitLipSync, upload.fields([{ name:'video', maxCount:1 }, { name:'audio', maxCount:1 }]), async (req, res) => {
+    req.setTimeout?.(12 * 60 * 1000);
+    res.setTimeout?.(12 * 60 * 1000);
+    const files = [...(req.files?.video || []), ...(req.files?.audio || [])];
+    let outputPath = '';
+    try {
+      if (!process.env.FAL_KEY) throw new Error('Lip Sync ainda não está habilitado: adicione FAL_KEY em Environment no Render studio-card. A chave não deve ser colocada no navegador nem enviada pelo chat.');
+      const video = req.files?.video?.[0]; const audio = req.files?.audio?.[0];
+      if (!video || !audio || !safeUploadName(video) || !safeUploadName(audio)) throw new Error('Envie um vídeo e um áudio válido para fazer o Lip Sync.');
+      const videoInfo = await probeMedia(video.path);
+      if (!videoInfo.width || !videoInfo.height) throw new Error('O arquivo de vídeo não contém uma imagem válida.');
+      if (videoInfo.duration < 1 || videoInfo.duration > 180) throw new Error('Use um vídeo com duração entre 1 e 180 segundos.');
+      if (!/^audio\//i.test(audio.mimetype || '') && !/\.(mp3|wav|m4a|aac|ogg|flac)$/i.test(audio.originalname || '')) throw new Error('O segundo arquivo precisa ser um áudio (MP3, WAV, M4A, AAC, OGG ou FLAC).');
+      const { fal } = await import('@fal-ai/client');
+      const { File: NodeFile } = await import('node:buffer');
+      fal.config({ credentials: process.env.FAL_KEY });
+      const videoBinary = fs.readFileSync(video.path);
+      const audioBinary = fs.readFileSync(audio.path);
+      const videoUpload = new NodeFile([videoBinary], path.basename(video.originalname || 'video.mp4'), { type: video.mimetype || 'video/mp4' });
+      const audioUpload = new NodeFile([audioBinary], path.basename(audio.originalname || 'audio.mp3'), { type: audio.mimetype || 'audio/mpeg' });
+      const videoUrl = await fal.storage.upload(videoUpload);
+      const audioUrl = await fal.storage.upload(audioUpload);
+      const result = await fal.subscribe('veed/lipsync', {
+        input: { video_url:videoUrl, audio_url:audioUrl },
+        logs: false
+      });
+      const generatedUrl = result?.data?.video?.url || result?.video?.url;
+      if (!generatedUrl) throw new Error('O modelo Lip Sync terminou sem retornar um vídeo. Tente outra vez com áudio e vídeo mais curtos.');
+      const download = await fetchFn(generatedUrl);
+      if (!download.ok) throw new Error(`A IA concluiu, mas não foi possível baixar o resultado (HTTP ${download.status}).`);
+      const bytes = await download.arrayBuffer();
+      if (!bytes.byteLength) throw new Error('O arquivo retornado pelo Lip Sync está vazio.');
+      const fileName = `studio-reel-${Date.now()}-${Math.random().toString(36).slice(2,8)}.mp4`;
+      outputPath = path.join('/tmp', fileName);
+      fs.writeFileSync(outputPath, Buffer.from(bytes));
+      const outInfo = await probeMedia(outputPath);
+      if (!outInfo.width || !outInfo.height || outInfo.duration < 1) { try{fs.unlinkSync(outputPath)}catch(_){} outputPath=''; throw new Error('A resposta da IA não é um MP4 válido. Tente outro áudio ou vídeo.'); }
+      const host = String(req.get('host') || '').replace(/[^a-z0-9.:-]/gi, '');
+      if (!host) throw new Error('Não foi possível gerar a URL pública do vídeo sincronizado.');
+      res.json({ success:true, fileName, videoUrl:`https://${host}/temp/${fileName}`, duration:outInfo.duration, width:outInfo.width, height:outInfo.height, message:'Lip Sync concluído.' });
+    } catch (error) {
+      if (outputPath) { try { fs.unlinkSync(outputPath); } catch (_) {} }
+      res.status(502).json({ success:false, error:error.message || 'Falha ao executar o Lip Sync.' });
+    } finally { cleanUploaded(files); }
+  });
+
   app.post('/editor/api/video/publish', async (req, res) => {
     try {
       const profile = String(req.body?.profile || 'padrao').trim().toLowerCase();
