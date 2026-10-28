@@ -1,21 +1,30 @@
 {
   "name": "studio-card",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "private": true,
-  "description": "Editor visual isolado do Central Goiano para artes e Reels do Instagram",
+  "description": "Studio Card do Central Goiano: editor visual de artes e vídeo/Reels integrado ao sistema existente",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js"
+    "build": "vite build frontend --config frontend/vite.config.js",
+    "start": "npm run build && node index.js",
+    "check": "node --check index.js && node --check studio-editor-routes.js && node --check studio-media-routes.js"
   },
-  "engines": {
-    "node": ">=20"
-  },
+  "engines": { "node": ">=20" },
   "dependencies": {
+    "@elah/editor": "^0.6.0",
+    "@fal-ai/client": "^1.5.0",
     "@sparticuz/chromium": "^138.0.2",
     "express": "^4.21.2",
+    "fabric": "^6.7.1",
+    "fflate": "^0.8.2",
     "ffmpeg-static": "^5.2.0",
+    "lucide-react": "^0.468.0",
     "multer": "^2.0.2",
     "node-fetch": "^3.3.2",
-    "puppeteer-core": "^24.15.0"
+    "puppeteer-core": "^24.15.0",
+    "react": "^19.1.1",
+    "react-dom": "^19.1.1",
+    "vite": "^6.3.5",
+    "@vitejs/plugin-react": "^4.7.0"
   }
 }
